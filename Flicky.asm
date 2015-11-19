@@ -22,9 +22,9 @@
 ;   disassembly tries to compromise with it, by putting some addresses
 ;   loaded into RAM (The ones at $10000+) as dc.w's in a table, rather
 ;   than say hardcoded addresses (so dc.w $F63A would be instead written
-;   as dc.w loc_1F63A). This will mostly be seen in places where the moveq
-;   instruction sets a data register to -1 ($FFFFFFFF) and overwrites the
-;   lower word with said address (I.E. $FFFFF63A would be loaded, and is
+;   as dc.w loc_1F63A&$FFFF). This will mostly be seen in places where the
+;   moveq instruction sets a data register to -1 ($FFFFFFFF) and overwrites
+;   the lower word with said address (I.E. $FFFFF63A would be loaded, and is
 ;   technically loaded from loc_1F63A, so it shouldn't matter too much).
 ;
 ; RAM ADDRESSES
@@ -34,6 +34,10 @@
 ; $FFCC00         - Top score (stored as BCD).
 ; $FFD24E         - Bonus stage flag.
 ; $FFD24F         - Level freeze flag (for depositing chicks).
+; $FFD266         - Time you finished the level, in minutes.
+; $FFD267         - Time you finished the level, in seconds.
+; $FFD28E         - Amount of chicks collected in the special stage.
+; $FFD28F         - Amount of chicks collected in the special stage, stored in BCD.
 ; $FFD82C         - Level number stored as decimal.
 ; $FFD82D         - Level number stored as hexadecimal.
 ; $FFD87E         - 1P score (stored as BCD).
@@ -62,9 +66,13 @@
 ; OBJECT SSTS
 ;
 ; 0   - Bit that is set to high if the object is loaded.
-; 1   - Object
-; 2   - Bitfield. H00000D0   H - Flip sprite horizontally. D - Disable display
+; 1   - Object.
+; 2   - Bitfield. H0000RD0   H - Flip sprite horizontally. D - Disable sprite display/update. R - Set when animation is reset.
+; 6   - Animation script.
+; 8   - Animation script table.
 ; $C  - Mappings address.
+; $10 - Current animation frame.
+; $11 - Animation frame duration.
 ; $20 - Horizontal position.
 ; $24 - Vertical position.
 ; $38 - Object subtype. TODO
@@ -81,7 +89,6 @@ alignFF		macro
 align00         macro
                 cnop    0,\1
                 endm
-
 
 StartofROM:
 Vectors:
@@ -101,7 +108,7 @@ Vectors:
                 dc.l    ErrorTrap, ErrorTrap, ErrorTrap, ErrorTrap
                 dc.l    ErrorTrap, ErrorTrap, ErrorTrap, ErrorTrap
                 dc.l    ErrorTrap, ErrorTrap, ErrorTrap, ErrorTrap
-                dc.b    'SEGA MEGA DRIVE '
+                dc.b    'SEGA MEGA DRIVE '      ; NOTE - A requirement of the TMSS is that the string 'SEGA' or ' SEGA' exists at the start here. This is important!
                 dc.b    '(C)SEGA 1991.FEB'
                 dc.b    'FLICKY                                          '
                 dc.b    '                FLICKY                          '
@@ -1953,8 +1960,8 @@ loc_10000:
                 move.l  #VBlank,($FFFFFA7E).w    ; Set VBlank address.
                 clr.w   ($FFFFFF96).w            ; Clear VBlank routine.
                 move.w  #$40,($FFFFFFC0).w       ; Set to run first game mode (Sega Screen).
-                clr.w   ($FFFFFFC4).w
-                clr.w   ($FFFFFFC2).w
+                clr.w   ($FFFFFFC4).w            ; Clear unused address 1.
+                clr.w   ($FFFFFFC2).w            ; Clear unused address 2.
                 bsr.w   loc_10cd4                ; Clear CRAM and VRAM (Except for plane nametables).
                 bsr.w   loc_10cf6                ; Load the sound driver instructions into Z80 RAM.
                 bsr.w   loc_100fc                ; Load the ASCII art into VRAM.
@@ -1968,11 +1975,11 @@ loc_10034:
                 move.w  #0,($C00000).l           ; Clear 2 bytes.
                 move.l  #$40020010,($C00004).l   ; Set VDP to VSRAM write (+$02).
                 move.w  #0,($C00000).l           ; Clear 2 bytes.
-                bsr.w   loc_113bc                ; Clear TODO.
+                bsr.w   loc_113bc                ; Clear H/VScroll values and TODO.
                 move.w  #$101,($FFFFD82C).w      ; Set the BCD and hex level round value to 0101.
                 move.w  #$2500,sr                ; Enable VBlank.
 MainGameLoop
-                movea.w StartofROM+2,sp          ; TODO
+                movea.w StartofROM+2,sp          ; Restore stack pointer back to $(XXXX)FF70.
                 move.w  ($FFFFFFC0).w,d0         ; Set game mode.
                 andi.l  #$0000007C,d0            ; Game mode limit.
                 jsr     GameModeArray(pc,d0.w)   ; Load appropriate game mode.
@@ -2679,34 +2686,34 @@ loc_1111e:
                 rts
 
 ; ======================================================================
-; TODO
-loc_11126:
-                move.w  6(a0),d0
-                movea.l 8(a0),a1
-                movea.l (a1,d0.w),a1
-                subq.b  #1,$11(a0)
-                bpl.s   loc_11142
-                move.b  1(a1),11(a0)
-                addq.b  #1,$10(a0)
+; TODO - Give this a name.
+AnimateSprite:                                   ; $11126
+                move.w  6(a0),d0                 ; Load the correct animation script.
+                movea.l 8(a0),a1                 ; Load the animation table.
+                movea.l (a1,d0.w),a1             ; Load the address of the animation script.
+                subq.b  #1,$11(a0)               ; Subtract 1 from the animation frame duration.
+                bpl.s   loc_11142                ; If there's still time left on the counter, branch.
+                move.b  1(a1),$11(a0)            ; Refresh frame counter.
+                addq.b  #1,$10(a0)               ; Get next animation.
 loc_11142:
                 moveq   #0,d0                    ; Clear d0.
-                move.b  $10(a0),d0
-                cmp.b   (a1),d0
-                bcs.s   loc_11158
-                clr.b   $10(a0)
-                moveq   #0,d0
-                bset    #2,2(a0)
+                move.b  $10(a0),d0               ; Move current animation frame into d0.
+                cmp.b   (a1),d0                  ; Has it hit the last animation?
+                bcs.s   loc_11158                ; If it hasn't, branch.
+                clr.b   $10(a0)                  ; Reset animation.
+                moveq   #0,d0                    ; Clear d0.
+                bset    #2,2(a0)                 ; Set the animation as 'reset'.
 loc_11158:
-                lsl.w   #1,d0
-                moveq   #-1,d1
-                move.w  2(a1,d0.w),d1
-                move.l  d1,$C(a0)
-                rts
+                lsl.w   #1,d0                    ; Multiply by 2 for word tables.
+                moveq   #-1,d1                   ; Set d1 to $FFFFFFFF.
+                move.w  2(a1,d0.w),d1            ; Load next mappings frame.
+                move.l  d1,$C(a0)                ; Write into the mappings frame.
+                rts                              ; Return.
 
 ; ======================================================================
 
 BuildSprites:                                  ; $11166
-                btst    #1,2(a0)               ; Is the 'hide sprite'/disable sprite display bit set?
+                btst    #1,2(a0)               ; Is the disable sprite update/display bit set?
                 beq.s   BuildSprites_Main      ; If not, set to load the sprite.
                 rts                            ; Return.
 
@@ -3054,7 +3061,7 @@ loc_1148a:
                 moveq   #0,d4                    ; Set to load the door mappings.
                 moveq   #0,d0
                 bsr.w   loc_11562                ; Load into VRAM.
-                lea     ($FFFFD830).w).w,a0
+                lea     ($FFFFD830).w,a0
                 moveq   #0,d0
                 move.b  (a6),(a0)+
                 move.b  1(a6),(a0)
@@ -3426,14 +3433,14 @@ loc_117be:
 ; ======================================================================
 
 loc_117c0:
-                tst.w   (a1)
+                tst.w   (a1)                     ; Is there an object in the RAM space?
+                beq.w   loc_11874                ; If there isn't, branch.
+                moveq   #0,d0                    ; Clear d0.
+                moveq   #0,d1                    ; Clear d1.
+                move.b  4(a0),d0                 ; Load TODO into d0.
+                cmpi.b  #$FF,d0
                 beq.w   loc_11874
-                moveq   #0,d0
-                moveq   #0,d1
-                move.b  4(a0),d0
-                cmpi.b  #-1,d0
-                beq.w   loc_11874
-                move.b  4(a1),d1
+                move.b  4(a1),d1                 ; Move TODO into d1.
                 cmpi.b  #$FF,d1
                 beq.w   loc_11874
                 lsl.w   #3,d0
@@ -3855,14 +3862,14 @@ loc_11b3c:
 
                 dc.w    $0003
                 dc.w    $0003
-                        ; TODO - These are the addresses, find the art location inside them!
+
 loc_11b54:
-                dc.w    $D81C
-                dc.w    $D820
-                dc.w    $D824
-                dc.w    $D810
-                dc.w    $D814
-                dc.w    $D818
+                dc.w    $FFFFD81C&$FFFF
+                dc.w    $FFFFD820&$FFFF
+                dc.w    $FFFFD824&$FFFF
+                dc.w    $FFFFD810&$FFFF
+                dc.w    $FFFFD814&$FFFF
+                dc.w    $FFFFD818&$FFFF
 
 ; ======================================================================
 
@@ -3870,8 +3877,8 @@ loc_11b60:
                 moveq   #0,d7                    ; Clear d7.
                 moveq   #0,d6                    ; Clear d6.
                 moveq   #0,d5                    ; Clear d5.
-                move.b  ($FFFFD82E).w,d7
-                move.b  ($FFFFD82F).w,d6
+                move.b  ($FFFFD82E).w,d7         ; Load the door's X coordinate to d7.
+                move.b  ($FFFFD82F).w,d6         ; Load the door's Y coordinate to d6.
                 move.w  #$E000,d5                ; Set to write to plane B's nametable.
                 bsr.w   loc_10f24                ; Get a VDP command in d5.
                 moveq   #2,d7                    ; Set to draw three tiles across.
@@ -4236,110 +4243,127 @@ loc_11e68:
                 bsr.w   loc_10ff4                ; Draw the numbers onto the screen.
 loc_11e94:
                 rts
-                
-; ======================================================================
-
-loc_11e96 4d fa 00 6c                      lea     (pc)(loc_11f04),a6
-loc_11e9a 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
-loc_11ea2 67 04                            beq.s   loc_11ea8
-loc_11ea4 4d fa 00 9a                      lea     (pc)(loc_11f40),a6
-loc_11ea8 61 00 f1 00                      bsr.w   WriteASCIIString
-loc_11eac 4d fa 00 62                      lea     (pc)(loc_11f10),a6
-loc_11eb0 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
-loc_11eb8 67 04                            beq.s   loc_11ebe
-loc_11eba 4d fa 00 92                      lea     (pc)(loc_11f4e),a6
-loc_11ebe 61 00 f0 ea                      bsr.w   WriteASCIIString
-loc_11ec2 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
-loc_11eca 67 08                            beq.s   loc_11ed4
-loc_11ecc 4d fa 00 88                      lea     (pc)(loc_11f56),a6
-loc_11ed0 61 00 f0 d8                      bsr.w   WriteASCIIString
-loc_11ed4 4d fa 00 48                      lea     (pc)(loc_11f1e),a6
-loc_11ed8 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
-loc_11ee0 67 04                            beq.s   loc_11ee6
-loc_11ee2 4d fa 00 7a                      lea     (pc)(loc_11f5e),a6
-loc_11ee6 61 00 f0 c2                      bsr.w   WriteASCIIString
-loc_11eea 4a 38 d2 66                      tst.b   ($FFFFD266).w
-loc_11eee 66 0a                            bne.s   loc_11efa
-loc_11ef0 4d fa 00 3a                      lea     (pc)(loc_11f2c),a6
-loc_11ef4 61 00 f0 b4                      bsr.w   WriteASCIIString
-loc_11ef8 60 08                            bra.s   loc_11f02
-loc_11efa 4d fa 00 38                      lea     (pc)(loc_11f34),a6
-loc_11efe 61 00 f0 aa                      bsr.w   WriteASCIIString
-loc_11f02 4e 75                            rts
-loc_11f04 c1 4a                            exg a0,a2
-loc_11f06 47 41                            .short 0x4741
-loc_11f08 4d 45                            .short 0x4d45
-loc_11f0a 20 54                            movea.l (a4),a0
-loc_11f0c 49 4d                            .short 0x494d
-loc_11f0e 45 00                            chkl d0,d2
-loc_11f10 c1 64                            and.w d0,(a4)-
-loc_11f12 4d 49                            .short 0x4d49
-loc_11f14 4e 2e                            .short 0x4e2e
-loc_11f16 20 20                            move.l  (a0)-,d0
-loc_11f18 53 45                            subq.w  #1,d5
-loc_11f1a 43 2e 00 00                      chkl (a6)(0),d1
-loc_11f1e c2 4a                            .short 0xc24a
-loc_11f20 54 49                            addq.w  #2,a1
-loc_11f22 4d 45                            .short 0x4d45
-loc_11f24 20 42                            movea.l d2,a0
-loc_11f26 4f 4e                            .short 0x4f4e
-loc_11f28 55 53                            subq.w  #2,(a3)
-loc_11f2a 00 00 c2 72                      ori.b #114,d0
-loc_11f2e 50 54                            addq.w  #8,(a4)
-loc_11f30 53 2e 00 00                      subq.b  #1,(a6)(0)
-loc_11f34 c2 68 4e 4f                      and.w (a0)(20047),d1
-loc_11f38 20 42                            movea.l d2,a0
-loc_11f3a 4f 4e                            .short 0x4f4e
-loc_11f3c 55 53                            subq.w  #2,(a3)
-loc_11f3e 00 00 c1 48                      ori.b #72,d0
-loc_11f42 52 4f                            addq.w  #1,sp
-loc_11f44 55 4e                            subq.w  #2,a6
-loc_11f46 44 20                            negb (a0)-
-loc_11f48 54 49                            addq.w  #2,a1
-loc_11f4a 4d 45                            .short 0x4d45
-loc_11f4c 00 00 c1 62                      ori.b #98,d0
-loc_11f50 4d 49                            .short 0x4d49
-loc_11f52 4e 2e                            .short 0x4e2e
-loc_11f54 00 00 c1 72                      ori.b #114,d0
-loc_11f58 53 45                            subq.w  #1,d5
-loc_11f5a 43 2e 00 00                      chkl (a6)(0),d1
-loc_11f5e c2 48                            .short 0xc248
-loc_11f60 54 49                            addq.w  #2,a1
-loc_11f62 4d 45                            .short 0x4d45
-loc_11f64 20 42                            movea.l d2,a0
-loc_11f66 4f 4e                            .short 0x4f4e
-loc_11f68 55 53                            subq.w  #2,(a3)
-loc_11f6a 00 00
 
 ; ======================================================================
 
+loc_11e96:
+                lea     loc_11f04(pc),a6         ; Load the 'GAME TIME' text at the results screen.
+                btst    #7,($A10001).l           ; Is this being played on a Japanese console?
+                beq.s   loc_11ea8                ; If it is, branch.
+                lea     loc_11f40(pc),a6         ; Load the repositioned version for the international consoles (Changed to ROUND TIME).
+loc_11ea8:
+                bsr.w   WriteASCIIString         ; Write to the screen.
+                lea     loc_11F10(pc),a6         ; Load the 'MIN.' and 'SEC.'
+                btst    #7,($A10001).l           ; Is this being played on a Japanese console?
+                beq.s   loc_11ebe                ; If it is, branch.
+                lea     loc_11F4E(pc),a6         ; Load the individual 'MIN.' string for international consoles.
+loc_11ebe:
+                bsr.w   WriteASCIIString         ; Write to the screen.
+                btst    #7,($A10001).l           ; Is this being played on a Japanese console?
+                beq.s   loc_11ed4                ; If it is, branch.
+                lea     loc_11F56(pc),a6
+                bsr.w   WriteASCIIString         ; Write to the screen.
+loc_11ed4:
+                lea     loc_11f1e(pc),a6
+                btst    #7,($A10001).l           ; Is this being played on a Japanese console?
+                beq.s   loc_11ee6                ; If it is, branch.
+                lea     loc_11F5E(pc),a6
+loc_11EE6:
+                bsr.w   WriteASCIIString         ; Write to the screen.
+                tst.b   ($FFFFD266).w            ; Has a minute elapsed?
+                bne.s   loc_11efa                ; If it has, branch.
+                lea     loc_11f2c(pc),a6         ; Load the 'PTS.' mappings.
+                bsr.w   WriteASCIIString         ; Write to the screen.
+                bra.s   loc_11f02                ; Skip loading 'NO BONUS'.
+
+                lea     loc_11f34(pc),a6         ; Load the NO BONUS mappings.
+                bsr.w   WriteASCIIString         ; Write to the screen.
+loc_11F02:
+                rts                              ; Return.
+
+; ----------------------------------------------------------------------
+; Japanese result screen map text.
+loc_11f04:
+                dc.w    $C14A                    ; VRAM address to write to.
+                dc.b    'GAME TIME'              ; Mappings text.
+                dc.b    $00                      ; String terminator.
+
+loc_11f10:
+                dc.w    $C164                    ; VRAM address to write to.
+                dc.b    'MIN.  SEC.'             ; Mappings text.
+                dc.w    $0000                    ; String terminator, pad to even.
+
+loc_11f1e:
+                dc.w    $C24A                    ; VRAM address to write to.
+                dc.b    'TIME BONUS'             ; Mappings text.
+                dc.w    $0000                    ; String terminator, pad to even.
+
+; ----------------------------------------------------------------------
+; Japanese and English shared result screen mappings.
+
+loc_11F2C:
+                dc.w    $C272                    ; VRAM address to write to.
+                dc.b    'PTS.'                   ; Mappings text.
+                dc.w    $0000`                   ; String terminator, pad to even.
+
+loc_11f34:
+                dc.w    $C268                    ; VRAM address to write to.
+                dc.b    'NO BONUS'               ; Mappings text.
+                dc.w    $0000                    ; String terminator, pad to even.
+
+; ----------------------------------------------------------------------
+; English result screen map text.
+loc_11F40:
+                dc.w    $C148                    ; VRAM address to write to.
+                dc.b    'ROUND TIME'             ; Mappings text.
+                dc.w    $0000                    ; String terminator, pad to even.
+
+loc_11F4E:
+                dc.w    $C162                    ; VRAM address to write to.
+                dc.b    'MIN.'                   ; Mappings text.
+                dc.w    $0000                    ; String terminator, pad to even.
+
+loc_11F56:
+                dc.w    $C172                    ; VRAM address to write to.
+                dc.b    'SEC.'                   ; Mappings text.
+                dc.w    $0000                    ; String terminator, pad to even.
+
+loc_11f5e:
+                dc.w    $C248                    ; VRAM address to write to.
+                dc.b    'TIME BONUS'             ; Mappings text.
+                dc.w    $0000                    ; String terminator, pad to even.
+
+; ----------------------------------------------------------------------
+; ======================================================================
+; Bonus stage results screen.
+; ======================================================================
 loc_11F6C:
-                tst.b   ($FFFFD28E).w).w
-                beq.s   loc_11faa
-                lea     ($FFFFD28F).w,a6
-                moveq   #0,d5
-                move.w  #$C248,d5
-                moveq   #0,d0
-                bsr.w   loc_10ff4
-                lea     ($FFFFD292).w,a6
-                moveq   #0,d5
-                move.w  #$C266,d5
-                moveq   #1,d0
-                bsr.w   loc_10ff4
-                cmpi.b  #$14,($FFFFD28E).w
-                bne.s   loc_11faa
-                lea     loc_11fac(pc),a6
-                moveq   #0,d5
-                move.w  #$C390,d5
-                moveq   #3,d0
-                bsr.w   loc_10ff4
+                tst.b   ($FFFFD28E).w            ; Have you collected any chicks in the bonus stage?
+                beq.s   loc_11faa                ; If you haven't, branch.
+                lea     ($FFFFD28F).w,a6         ; Load the RAM address of the collected bonus stage chicks in BCD, to a6.
+                moveq   #0,d5                    ; Clear d5.
+                move.w  #$C248,d5                ; Load the position on Plane A to write the number.
+                moveq   #0,d0                    ; Set to draw 1 byte.
+                bsr.w   loc_10ff4                ; Write onto the screen.
+                lea     ($FFFFD292).w,a6         ; Load the points (? TODO) bonus for the collected chicks.
+                moveq   #0,d5                    ; Clear d5.
+                move.w  #$C266,d5                ; Load the position on Plane A to write to.
+                moveq   #1,d0                    ; Set to load 2 bytes worth.
+                bsr.w   loc_10ff4                ; Write onto the screen.
+                cmpi.b  #$14,($FFFFD28E).w       ; Have you collected all 20 chicks?
+                bne.s   loc_11faa                ; If you haven't, skip the perfect bonus stuff.
+                lea     loc_11fac(pc),a6         ; Load the perfect bonus value.
+                moveq   #0,d5                    ; Clear d5.
+                move.w  #$C390,d5                ; Load the position on Plane A to write to.
+                moveq   #3,d0                    ; Set to write 4 bytes.
+                bsr.w   loc_10ff4                ; Write onto the screen.
 loc_11faa:
-                rts
-                
+                rts                              ; Return.
+
 ; ----------------------------------------------------------------------
 
 loc_11fac:
-                dc.b    $00, $01, $00, $00
+                dc.l    $00010000
 
 ; ======================================================================
 
@@ -4353,7 +4377,7 @@ TitleScreen_Load:                                ; $11FB0
                 bsr.w   loc_10126                ; Reload the ASCII art.
                 lea     Pal_Main,a5              ; Load the main palette source into a5.
                 jsr     ($FFFFFBBA).w            ; Decode and load into the appropriate position in the palette buffer.
-                lea     loc_1210c(pc),a0         ; Load the title screen palette into a0.
+                lea     Pal_TitleScreen(pc),a0   ; Load the title screen palette into a0.
                 lea     ($FFFFF840).w,a1         ; Load buffer space for the last palette line.
                 moveq   #3,d0                    ; Set to write 8 palettes.
 loc_11FE2:
@@ -4366,7 +4390,7 @@ loc_11FE2:
                 lea     Map_EngTitle(pc),a0      ; Load the English cast text.
 loc_11ffc:
                 movea.l (a0)+,a6                 ; Load the pointer into a6.
-                bsr.w   WriteASCIIString                ; Dump onto the screen.
+                bsr.w   WriteASCIIString         ; Dump onto the screen.
                 dbf     d0,loc_11ffc             ; Repeat for the rest.
                 move.b  #3,($FFFFD882).w         ;
                 move.w  #$101,($FFFFD82C).w      ; Set the BCD and hex level round to 0101.
@@ -4474,15 +4498,13 @@ loc_12104:
 
 ; ======================================================================
 
-loc_1210C:
-
-                include "Palettes\loc_1210C.bin"
+Pal_TitleScreen:                                 ; $1210C
+                include "Palettes\Pal_TitleScreen.bin"
 
 Map_Trademark:                                   ; $1211C
                 dc.w    $C0EE                    ; VRAM address.
-                dc.b    $54                      ; 'T'
-                dc.b    $4D                      ; 'M'
-                dc.w    0                        ; Padding.
+                dc.b    'TM'                     ; Mappings text.
+                dc.w    $00                      ; String terminator.
 
 ; ======================================================================
 
@@ -4517,13 +4539,13 @@ loc_12172:
                 bset    #7,2(a0)                 ; Flip sprite horizontally (face left).
                 move.w  $38(a0),d0               ; Load the object's subtype to d0.
                 lsl.w   #1,d0                    ; Multiply by 2 to handle word-sized tables.
-                move.w  loc_121b4(pc,d0.w),6(a0)
+                move.w  loc_121b4(pc,d0.w),6(a0) ; Load the correct animation script.
                 lsl.w   #1,d0                    ; Multiply again by 2 (x4) to handle longword-sized tables.
-                move.l  loc_121a4(pc,d0.w),8(a0)
+                move.l  loc_121a4(pc,d0.w),8(a0) ; Load correct character animation script table.
                 move.w  loc_121bc(pc,d0.w),$20(a0) ; Set starting horizontal height.
                 move.w  loc_121bc+2(pc,d0.w),$24(a0) ; Set starting vertical height.
 loc_1219e:
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite            ; Set sprite to animate.
                 rts                              ; Return.
 
 ; ----------------------------------------------------------------------
@@ -6179,7 +6201,7 @@ loc_13550 61 00 db 0a                      bsr.w   loc_1105c
 loc_13554 0c 68 00 78 00 24                cmpi.w  #120,$24(a0)
 loc_1355a 6e 04                            bgt.s   loc_13560
 loc_1355c 61 00 db 92                      bsr.w   loc_110f0
-loc_13560 61 00 db c4                      bsr.w   loc_11126
+loc_13560 61 00 db c4                      bsr.w   AnimateSprite
 loc_13564 4e 75                            rts
 
 ; ======================================================================
@@ -7397,7 +7419,7 @@ loc_14346 66 0a                            bne.s   loc_14352
 loc_14348 21 7c 00 01 a8 a0 00 0c          move.l  #108704,$C(a0)
 loc_14350 4e 75                            rts
 loc_14352 42 68 00 06                      clr.w 6(a0)
-loc_14356 61 00 cd ce                      bsr.w   loc_11126
+loc_14356 61 00 cd ce                      bsr.w   AnimateSprite
 loc_1435a 4e 75                            rts
 loc_1435c 21 7c 00 01 a8 98 00 0c          move.l  #108696,$C(a0)
 loc_14364 4e 75                            rts
@@ -7407,10 +7429,10 @@ loc_1436a 31 7c 00 08 00 06                move.w  #8,6(a0)
 loc_14370 4a 80                            tst.l   d0
 loc_14372 6a 06                            bpl.s   loc_1437a
 loc_14374 08 e8 00 07 00 02                bset    #7,2(a0)
-loc_1437a 61 00 cd aa                      bsr.w   loc_11126
+loc_1437a 61 00 cd aa                      bsr.w   AnimateSprite
 loc_1437e 4e 75                            rts
 loc_14380 31 7c 00 04 00 06                move.w  #4,6(a0)
-loc_14386 61 00 cd 9e                      bsr.w   loc_11126
+loc_14386 61 00 cd 9e                      bsr.w   AnimateSprite
 loc_1438a 4e 75                            rts
 loc_1438c 08 e8 00 07 00 3c                bset    #7,$3C(a0)
 loc_14392 66 1a                            bne.s   loc_143ae
@@ -7435,7 +7457,7 @@ loc_143d2 61 00 d1 a8                      bsr.w   loc_1157c
 loc_143d6 4a 04                            tst.b   d4
 loc_143d8 67 04                            beq.s   loc_143de
 loc_143da 42 a8 00 2c                      clr.l   $2C(a0)
-loc_143de 61 00 cd 46                      bsr.w   loc_11126
+loc_143de 61 00 cd 46                      bsr.w   AnimateSprite
 loc_143e2 4e 75                            rts
 loc_143e4 42 a8 00 2c                      clr.l   $2C(a0)
 loc_143e8 02 46 ff f8                      andi.w  #$FFF8,d6
@@ -7450,7 +7472,7 @@ loc_14408 42 28 00 10                      clr.b   $10(a0)
 loc_1440c 08 a8 00 02 00 02                bclr    #2,2(a0)
 loc_14412 11 7c 00 03 00 39                move.b  #3,$39(a0)
 loc_14418 61 00 cc 42                      bsr.w   loc_1105c
-loc_1441c 61 00 cd 08                      bsr.w   loc_11126
+loc_1441c 61 00 cd 08                      bsr.w   AnimateSprite
 loc_14420 08 a8 00 02 00 02                bclr    #2,2(a0)
 loc_14426 67 08                            beq.s   loc_14430
 loc_14428 53 28 00 39                      subq.b  #1,$39(a0)
@@ -7491,22 +7513,39 @@ loc_144a2 43 e9 00 40                      lea     $40(a1),a1
 loc_144a6 51 c9 ff d4                      dbf     d1,loc_1447c
 loc_144aa 4e 75                            rts
 
-loc_144ac: 00 01 44 bc                      ori.b #-68,d1
-loc_144b0 00 01 44 c2                      ori.b #-62,d1
-loc_144b4 00 01 44 c8                      ori.b #-56,d1
-loc_144b8 00 01 44 ce                      ori.b #-50,d1
-loc_144bc 02 02 a8 a8                      andi.b  #-88,d2
-loc_144c0 a8 b0                            .short 0xa8b0
-loc_144c2 02 02 a8 b8                      andi.b  #-72,d2
+; ======================================================================
+
+loc_144ac:
+                dc.l    loc_144BC                ; Flicky running.
+                dc.l    loc_144C2
+                dc.l    loc_144C8
+                dc.l    loc_144CE
+
+; ----------------------------------------------------------------------
+
+loc_144bc:
+                dc.b    $02, $02                 ; Animation table entries and animation frame duration.
+                dc.w    loc_1A8A8&$FFFF          ; TODO Find this stuff out.
+                dc.w    loc_1A8B0&$FFFF
+
+; ----------------------------------------------------------------------
+
+loc_144c2:
+02 02 a8 b8                      andi.b  #-72,d2
 loc_144c6 a8 c0                            .short 0xa8c0
-loc_144c8 02 02 a8 c8                      andi.b  #-56,d2
+
+loc_144c8: 02 02 a8 c8                      andi.b  #-56,d2
 loc_144cc a8 d0                            .short 0xa8d0
-loc_144ce 06 03 a8 78                      addi.b #120,d3
+
+loc_144ce: 06 03 a8 78                      addi.b #120,d3
 loc_144d2 a8 80                            .short 0xa880
 loc_144d4 a8 88                            .short 0xa888
 loc_144d6 a8 90                            .short 0xa890
 loc_144d8 a8 88                            .short 0xa888
 loc_144da a8 90                            .short 0xa890
+
+; ======================================================================
+
 loc_144dc 08 d0 00 07                      bset    #7,(a0)
 loc_144e0 66 22                            bne.s   loc_14504
 loc_144e2 1e 38 d8 34                      move.b  ($FFFFD834).w,d7
@@ -7524,7 +7563,7 @@ loc_14510 61 00 cb 4a                      bsr.w   loc_1105c
 loc_14514 4e 75                            rts
 loc_14516 60 00 00 06                      bra.w   loc_1451e
 loc_1451a 60 00 00 06                      bra.w   loc_14522
-loc_1451e 61 00 cc 06                      bsr.w   loc_11126
+loc_1451e 61 00 cc 06                      bsr.w   AnimateSprite
 loc_14522 4e 75                            rts
 loc_14524 00 01 45 28                      ori.b #$28,d1
 loc_14528 02 08                            .short 0x0208
@@ -7679,7 +7718,7 @@ loc_14688:
                 tst.l   d7
                 bpl.s   loc_146a0
                 bset    #7,2(a0)
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 tst.b   $38(a0)
                 bne.s   loc_146be
                 tst.l   d7
@@ -7912,7 +7951,7 @@ loc_148aa:
                 move.l  #$10,($FFFFD262).w
                 bsr.w   loc_1168a
 loc_1490e:
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 bsr.w   loc_1105c
 loc_14916:
                 rts
@@ -8020,7 +8059,7 @@ loc_14a3c:
 loc_14a48:
                 move.w  #4,6(a0)
 loc_14a4e:
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 bsr.w   loc_110ba
                 rts
 
@@ -8071,7 +8110,7 @@ loc_14A7C:
                 rts
 
 ; ----------------------------------------------------------------------
-
+                                 ; TODO
 loc_14ac0:
                 dc.l    $00000100
                 dc.l    $00000200
@@ -8223,7 +8262,7 @@ loc_14c2e:
                 bpl.s   loc_14c40
                 bset    #7,2(a0)
 loc_14c40:
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 bsr.w   loc_14d52
                 rts
 
@@ -8306,7 +8345,7 @@ loc_14d16:
                 bpl.s   loc_14d28
                 bset    #7,2(a0)
 loc_14d28:
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 bsr.w   loc_14d52
                 rts
 
@@ -8357,7 +8396,7 @@ loc_14da2:
                 tst.b   $39(a0)
                 beq.s   loc_14db8
                 bset    #7,2(a0)
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 bclr    #2,2(a0)
                 beq.s   loc_14dd0
                 bchg    #0,$39(a0)
@@ -8545,7 +8584,7 @@ loc_14f64:
                 move.b  #6,5(a0)
 loc_14f80:
                 bsr.w   loc_1105c
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 bclr    #2,2(a0)
                 beq.s   loc_14fd0
                 move.w  #8,$3C(a0)
@@ -8690,7 +8729,7 @@ loc_15114:
                 bpl.s   loc_15126
                 bset    #7,2(a0)
                 move.w  #4,6(a0)
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 rts
 
 ; ======================================================================
@@ -8811,7 +8850,7 @@ loc_1527a:
                 tst.b   $39(a0)
                 beq.s   loc_15290
                 bset    #7,2(a0)
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 bclr    #2,2(a0)
                 beq.s   loc_152a8
                 bchg    #0,$39(a0)
@@ -8920,7 +8959,7 @@ loc_153a4:
                 move.l  #$FFFFC000,$2C(a0)
 loc_153c8:
                 bsr.w   loc_1105c
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 btst    #2,2(a0)
                 beq.s   loc_15408
                 move.b  ($FFFFD88A).w,d0
@@ -10123,7 +10162,7 @@ loc_15e40:
                 bsr.w   loc_115c0
                 tst.b   d4
                 bne.s   loc_15ed6
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 rts
 
 loc_15e86:
@@ -10179,7 +10218,7 @@ loc_15ee6:
                 bsr.w   loc_115c0
                 tst.b   d4
                 bne.s   loc_15f8e
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 rts
 
 ; ======================================================================
@@ -10238,7 +10277,7 @@ loc_15f9e:
                 bsr.w   loc_1157c
                 tst.b   d4
                 bne.s   loc_16004
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 rts
 
 loc_15fde:
@@ -10286,7 +10325,7 @@ loc_16036:
                 bsr.w   loc_1157c
                 tst.b   d4
                 bne.s   loc_1609a
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 rts
 
 ; ======================================================================
@@ -10336,7 +10375,7 @@ loc_160d6:
                 subq.w  #8,d6
                 bsr.w   loc_1157c
                 bne.s   loc_1610c
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 rts
 
 loc_1610c:
@@ -10360,7 +10399,7 @@ loc_16136:
                 addq.w  #8,d6
                 bsr.w   loc_1157c
                 bne.s   loc_16160
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 rts
 
 loc_16160:
@@ -10405,7 +10444,7 @@ loc_161bc:
                 clr.b   5(a0)
 loc_161e0:
                 bsr.w   loc_1105c
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 btst    #2,2(a0)
                 beq.s   loc_16216
                 move.b  ($FFFFD88A).w,d0
@@ -10578,7 +10617,7 @@ loc_16396:
                 clr.w   6(a0)
 loc_163ac:
                 bsr.w   loc_1105c
-                bsr.w   loc_11126
+                bsr.w   AnimateSprite
                 bclr    #2,2(a0)
                 beq.s   loc_163de
                 movea.l a0,a1
@@ -10651,11 +10690,11 @@ loc_1644e:
                 rts
 
 ; ----------------------------------------------------------------------
-
+                                 
 loc_16450:
-                dc.w    loc_AB2C                           
-                dc.w    loc_AB3C
-                dc.w    loc_AB4C
+                dc.w    loc_1AB2C&$FFFF
+                dc.w    loc_1AB3C&$FFFF
+                dc.w    loc_1AB4C&$FFFF
 
 ; ======================================================================
 
@@ -10693,14 +10732,14 @@ loc_1649c:
 ; ----------------------------------------------------------------------
 
 loc_1649e:
-                dc.w    loc_1AB24
-                dc.w    loc_1AB2C
-                dc.w    loc_1AB34                  
-                dc.w    loc_1AB3C              
-                dc.w    loc_1AB44
-                dc.w    loc_1AB54
-                dc.w    loc_1AB5C
-                dc.w    loc_1AB6C                      
+                dc.w    loc_1AB24&$FFFF
+                dc.w    loc_1AB2C&$FFFF
+                dc.w    loc_1AB34&$FFFF
+                dc.w    loc_1AB3C&$FFFF
+                dc.w    loc_1AB44&$FFFF
+                dc.w    loc_1AB54&$FFFF
+                dc.w    loc_1AB5C&$FFFF
+                dc.w    loc_1AB6C&$FFFF                      
                 
 ; ======================================================================
 
@@ -10725,15 +10764,15 @@ loc_164d8:
 ; ----------------------------------------------------------------------
 
 loc_164da:
-                dc.w    loc_1AB24
-                dc.w    loc_1AB2C
-                dc.w    loc_1AB34
-                dc.w    loc_1AB3C
-                dc.w    loc_1AB44
-                dc.w    loc_1AB4C
-                dc.w    loc_1AB54
-                dc.w    loc_1AB5C
-                dc.w    loc_1AB64
+                dc.w    loc_1AB24&$FFFF
+                dc.w    loc_1AB2C&$FFFF
+                dc.w    loc_1AB34&$FFFF
+                dc.w    loc_1AB3C&$FFFF
+                dc.w    loc_1AB44&$FFFF
+                dc.w    loc_1AB4C&$FFFF
+                dc.w    loc_1AB54&$FFFF
+                dc.w    loc_1AB5C&$FFFF
+                dc.w    loc_1AB64&$FFFF
 
 ; ======================================================================
 
@@ -10748,7 +10787,7 @@ loc_1650a 42 68 00 06                      clr.w 6(a0)
 loc_1650e 31 7c 01 2c 00 38                move.w  #300,$38(a0)
 loc_16514 08 a8 00 07 00 02                bclr    #7,2(a0)
 loc_1651a 61 00 ab 40                      bsr.w   loc_1105c
-loc_1651e 61 00 ac 06                      bsr.w   loc_11126
+loc_1651e 61 00 ac 06                      bsr.w   AnimateSprite
 loc_16522 43 f8 c4 40                      lea     ($FFFFC440).w,a1
 loc_16526 61 00 b2 98                      bsr.w   loc_117c0
 loc_1652a 4a 00                            tst.b   d0
@@ -10809,7 +10848,7 @@ loc_165ec 42 68 00 06                      clr.w 6(a0)
 loc_165f0 4a 38 d2 7b                      tst.b   ($FFFFD27B).w
 loc_165f4 66 08                            bne.s   loc_165fe
 loc_165f6 61 00 aa 64                      bsr.w   loc_1105c
-loc_165fa 61 00 ab 2a                      bsr.w   loc_11126
+loc_165fa 61 00 ab 2a                      bsr.w   AnimateSprite
 loc_165fe 4e 75                            rts
 loc_16600 08 d0 00 07                      bset    #7,(a0)
 loc_16604 66 32                            bne.s   loc_16638
@@ -10825,7 +10864,7 @@ loc_16632 31 7c 00 04 00 06                move.w  #4,6(a0)
 loc_16638 4a 38 d2 7b                      tst.b   ($FFFFD27B).w
 loc_1663c 66 08                            bne.s   loc_16646
 loc_1663e 61 00 aa 1c                      bsr.w   loc_1105c
-loc_16642 61 00 aa e2                      bsr.w   loc_11126
+loc_16642 61 00 aa e2                      bsr.w   AnimateSprite
 loc_16646 4e 75                            rts
 loc_16648 43 f8 c5 80                      lea     ($FFFFC580,a1
 loc_1664c 2e 29 00 30                      move.l  $30(a1),d7
@@ -10876,7 +10915,7 @@ loc_166e6 31 71 00 00 00 3a                move.w  (a1,d0.w),$3A(a0)
 loc_166ec 70 7c                            moveq   #$7C,d0
 loc_166ee c0 68 00 3c                      and.w   $3C(a0),d0
 loc_166f2 4e bb 00 08                      jsr     (pc)(loc_166fc,d0.w)
-loc_166f6 61 00 aa 2e                      bsr.w   loc_11126
+loc_166f6 61 00 aa 2e                      bsr.w   AnimateSprite
 loc_166fa 4e 75                            rts
 loc_166fc 60 00 00 0a                      bra.w   loc_16708
 loc_16700 60 00 00 80                      bra.w   loc_16782
@@ -10932,7 +10971,7 @@ loc_167c0 66 06                            bne.s   loc_167c8
 loc_167c2 31 7c 00 08 00 3c                move.w  #8,$3C(a0)
 loc_167c8 61 00 00 8a                      bsr.w   loc_16854
 loc_167cc 61 00 a8 8e                      bsr.w   loc_1105c
-loc_167d0 61 00 a9 54                      bsr.w   loc_11126
+loc_167d0 61 00 a9 54                      bsr.w   AnimateSprite
 loc_167d4 4e 75                            rts
 loc_167d6 08 e8 00 07 00 3c                bset    #7,$3C(a0)
 loc_167dc 66 28                            bne.s   loc_16806
@@ -10959,7 +10998,7 @@ loc_16824 0c 68 01 80 00 24                cmpi.w  #$180,$24(a0)
 loc_1682a 65 08                            bcs.s   loc_16834
 loc_1682c 61 00 a8 c2                      bsr.w   loc_110f0
 loc_16830 53 38 d8 83                      subq.b  #1,($FFFFD883).w
-loc_16834 61 00 a8 f0                      bsr.w   loc_11126
+loc_16834 61 00 a8 f0                      bsr.w   AnimateSprite
 loc_16838 4a 38 d8 83                      tst.b   ($FFFFD883).w
 loc_1683c 66 14                            bne.s   loc_16852
 loc_1683e 42 78 ff 92                      clr.w   ($FFFFFF92).w
@@ -17148,12 +17187,18 @@ loc_1a89e f8 f8                            .short 0xf8f8
 loc_1a8a0 00 01 f0 05                      ori.b #5,d1
 loc_1a8a4 44 16                            negb (a6)
 loc_1a8a6 f8 f8                            .short 0xf8f8
-loc_1a8a8 00 00 e8 06                      ori.b #6,d0
+
+; ======================================================================
+
+loc_1a8a8: 00 00 e8 06                      ori.b #6,d0
 loc_1a8ac 44 1a                            negb (a2)+
 loc_1a8ae f8 f8                            .short 0xf8f8
-loc_1a8b0 00 00 e8 06                      ori.b #6,d0
+loc_1a8b0: 00 00 e8 06                      ori.b #6,d0
 loc_1a8b4 44 20                            negb (a0)-
 loc_1a8b6 f8 f8                            .short 0xf8f8
+
+; ===========================================================================
+
 loc_1a8b8 00 01 f0 05                      ori.b #5,d1
 loc_1a8bc 44 26                            negb (a6)-
 loc_1a8be f8 f8                            .short 0xf8f8
