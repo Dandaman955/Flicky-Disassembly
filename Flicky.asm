@@ -37,6 +37,10 @@
 ; $FFD82C         - Level number stored as decimal.
 ; $FFD82D         - Level number stored as hexadecimal.
 ; $FFD87E         - 1P score (stored as BCD).
+; $FFD888-$FFD88A - In-game timer, stored as a BCD. First byte is the minute timer, second
+;                 - byte is the second timer and the third byte is the centisecond timer.
+;                 - The fourth byte is unused.
+; $FFD88D         - Keeps track of how many times you've deposited chicks to the door.
 ; $FFE630         - Nemesis decompression buffer.
 ; $FFF7E0         - Palette buffer.
 ; $FFFA70-$FFFBCB - Subroutine table pointers.
@@ -2492,20 +2496,18 @@ loc_10FA6:
                 rts                              ; Return.
 
 ; ======================================================================
-; TODO - Annotate this better.
-loc_10faa:
+WriteASCIIString:                                ; $10FAA
                 moveq   #0,d6                    ; Clear d6.
-                move.w  (a6)+,d6                 ;
+                move.w  (a6)+,d6                 ; Move the VRAM address into d6.
 loc_10FAE:
                 moveq   #0,d4                    ; Clear d4.
                 moveq   #0,d5                    ; Clear d5.
-                move.w  d6,d5
-                move.b  (a6)+,d4
-                beq.s   loc_10fbe
-                bsr.s   loc_10f94
-                addq.w  #2,d6
-                bra.s   loc_10fae
-
+                move.w  d6,d5                    ; Copy VRAM address to d5.
+                move.b  (a6)+,d4                 ; Get first byte.
+                beq.s   loc_10fbe                ; If it's a string terminator ($00), end the string.
+                bsr.s   loc_10f94                ; Write onto the screen.
+                addq.w  #2,d6                    ; Load next VRAM tile.
+                bra.s   loc_10fae                ; Repeat until a 0 is hit.
 loc_10fbe:
                 rts                              ; Return.
 
@@ -2910,24 +2912,27 @@ loc_1135e:
                 rts                              ; Return.
 
 ; ======================================================================
-
-loc_1137a:
-                subq.b  #1,1(a0)
-                bpl.s   loc_1138a
-                move.b  1(a1),1(a0)
-                addq.b  #1,(a0)
-                moveq   #0,d0
-                move.b  (a0),d0
-                cmp.b   (a1),d0
-                bcs.s   loc_113a0
-                clr.b   (a0)
-                moveq   #0,d0
-                move.b  #1,2(a0)
+; Deals with the logic of the exit sign's rotating palette (which isn't
+; actually a rotating palette, rather it's loading new tiles over them).
+; ======================================================================
+SignFrameLogic:                                  ; $1137A
+                subq.b  #1,1(a0)                 ; Subtract 1 from the sign counter.
+                bpl.s   loc_1138a                ; If it hasn't gone under 0, branch.
+                move.b  1(a1),1(a0)              ; Otherwise, refresh the counter.
+                addq.b  #1,(a0)                  ; Load next sign frame.
+loc_1138A:
+                moveq   #0,d0                    ; Clear d0.
+                move.b  (a0),d0                  ; Load the current frame into d0.
+                cmp.b   (a1),d0                  ; Has it hit the last sign frame?
+                bcs.s   loc_113a0                ; If it hasn't, branch.
+                clr.b   (a0)                     ; Reset sign frame back to 0.
+                moveq   #0,d0                    ; Clear d0.
+                move.b  #1,2(a0)                 ; Set TODO flag to 1.
 loc_113a0:
-                asl.w   #2,d0
-                movea.l 2(a1,d0.w),a6
-                bsr.w   loc_10f70
-                rts
+                asl.w   #2,d0                    ; Multiply by 4 for longword tables.
+                movea.l 2(a1,d0.w),a6            ; Load the address for the next sign frame.
+                bsr.w   loc_10f70                ; Write to the screen.
+                rts                              ; Return.
 
 ; ======================================================================
 ; TODO
@@ -3049,7 +3054,7 @@ loc_1148a:
                 moveq   #0,d4                    ; Set to load the door mappings.
                 moveq   #0,d0
                 bsr.w   loc_11562                ; Load into VRAM.
-                lea     ($FFFFD830).w,a0
+                lea     ($FFFFD830).w).w,a0
                 moveq   #0,d0
                 move.b  (a6),(a0)+
                 move.b  1(a6),(a0)
@@ -3284,29 +3289,33 @@ loc_116bc:
                 rts
 
 ; ======================================================================
-
-loc_116be:
-                moveq   #1,d1
-                move.b  ($FFFFD88A).w,d0
-                addi.b  #0,d0
-                abcd    d1,d0
-                move.b  d0,($FFFFD88A).w
-                cmpi.b  #$60,d0
-                bcs.s   loc_116fe
-                clr.b   ($FFFFD88A).w
-                move.b  ($FFFFD889).w,d0
-                addi.b  #0,d0
-                abcd    d1,d0
-                move.b  d0,($FFFFD889).w
-                cmpi.b  #$60,d0
-                bcs.s   loc_116fe
-                clr.b   ($FFFFD889).w
-                move.b  ($FFFFD888).w,d0
-                addi.b  #0,d0
-                abcd    d1,d0
-                move.b  d0,($FFFFD888).w
+; Sets the logic for the in-game timer you see at the end of rounds.
+; NOTE - While the timer has checks to stop the centisecond and second
+; timers from overflowing past 60, the minute timer doesn't, meaning you
+; can overflow the whole timer back to 0 if you go over 99:59.59.
+; ======================================================================
+TimerCounter:                                    ; $116BE
+                moveq   #1,d1                    ; Set value to increment by.
+                move.b  ($FFFFD88A).w,d0         ; Load the centisecond timer value to d0.
+                addi.b  #0,d0                    ; Clear the extend ccr bit.
+                abcd    d1,d0                    ; Add by a centisecond.
+                move.b  d0,($FFFFD88A).w         ; Update centisecond timer.
+                cmpi.b  #$60,d0                  ; Has it hit 60 or over?
+                bcs.s   loc_116fe                ; If it hasn't yet, branch.
+                clr.b   ($FFFFD88A).w            ; Set the centisecond time to 0.
+                move.b  ($FFFFD889).w,d0         ; Load the second timer value to d0.
+                addi.b  #0,d0                    ; Clear the extend ccr bit.
+                abcd    d1,d0                    ; Increment by a second.
+                move.b  d0,($FFFFD889).w         ; Update second timer.
+                cmpi.b  #$60,d0                  ; Has it hit 60 seconds?
+                bcs.s   loc_116fe                ; If it hasn't, branch.
+                clr.b   ($FFFFD889).w            ; Clear centisecond timer.
+                move.b  ($FFFFD888).w,d0         ; Load the minute/second segment of the timer.
+                addi.b  #0,d0                    ; Clear the extend bit.
+                abcd    d1,d0                    ; Add by a minute.
+                move.b  d0,($FFFFD888).w         ; Update the minute timer.
 loc_116fe:
-                rts
+                rts                              ; Return.
 
 ; ======================================================================
 
@@ -3872,15 +3881,14 @@ loc_11b60:
                 rts                              ; Return.
 
 ;  =====================================================================
-                                                                             ; TODO
 loc_11b86:
-                lea     ($FFFFD82E).w,a0
+                lea     ($FFFFD82E).w,a0         ; Load the door's X and Y coordinate word.
                 moveq   #0,d7                    ; Clear d7.
                 moveq   #0,d6                    ; Clear d6.
                 moveq   #0,d5                    ; Clear d5.
-                move.b  (a0),d7
-                move.b  1(a0),d6
-                subq.b  #1,d6
+                move.b  (a0),d7                  ; Load the door's X-coordinates into d7.
+                move.b  1(a0),d6                 ; Load the door's Y-coordinates into d6.
+                subq.b  #1,d6                    ; Set to load above the door.
                 move.w  #$E000,d5                ; Set to write in the Plane B screen space.
                 bsr.w   loc_10f24                ; Output a VRAM address into d5.
                 moveq   #2,d7                    ; Set to write 3 tiles across.
@@ -3894,83 +3902,130 @@ loc_11bbc:
                 rts                              ; Return.
 
 ; ======================================================================
+; Unused?
+loc_11bc2
+                moveq   #4,d0
+                moveq   #5,d3
+loc_11BC6:
+                move.w  loc_11bdc(pc,d0.w),d1
+                move.w  loc_11bdc+2(pc,d0.w),d4
+                lsr.w   #1,d0                    ; Set to skip every 2 bytes.
+                moveq   #-1,d2                   ; Set d2 to $FFFFFFFF.
+                move.w  loc_11bf8(pc,d0.w),d2    ; Overwrite lower word with RAM address.
+                lsl.w   #1,d0                    ; Set to skip every 4 bytes.
+                movea.l d2,a0                    ; Set as address.
+                bra.s   loc_11c06                ;
 
-loc_11bc2 70 04                            moveq   #4,d0
-loc_11bc4 76 05                            moveq   #5,d3
-loc_11bc6 32 3b 00 14                      move.w  (pc)(loc_11bdc,d0.w),d1
-loc_11bca 38 3b 00 12                      move.w  (pc)(loc_11bde,d0.w),d4
-loc_11bce e2 48                            lsr.w   #1,d0
-loc_11bd0 74 ff                            moveq   #-1,d2
-loc_11bd2 34 3b 00 24                      move.w  (pc)(loc_11bf8,d0.w),d2
-loc_11bd6 e3 48                            lsl.w   #1,d0
-loc_11bd8 20 42                            movea.l d2,a0
-loc_11bda 60 2a                            bra.s   loc_11c06
-loc_11bdc 00 00 00 00                      ori.b #0,d0
-loc_11be0 00 00 00 00                      ori.b #0,d0
-loc_11be4 00 01 00 01                      ori.b #1,d1
-loc_11be8 00 00 00 02                      ori.b #2,d0
-loc_11bec 00 13 00 03                      ori.b #3,(a3)
-loc_11bf0 00 07 00 04                      ori.b #4,d7
-loc_11bf4 00 07 00 05                      ori.b #5,d7
+; ----------------------------------------------------------------------
+
+loc_11bdc:
+                dc.w    $0000
+                dc.w    $0000
+
+                dc.w    $0000
+                dc.w    $0000
+
+                dc.w    $0001
+                dc.w    $0001
+
+                dc.w    $0000
+                dc.w    $0002
+
+                dc.w    $0013
+                dc.w    $0003
+
+                dc.w    $0007
+                dc.w    $0004
+
+                dc.w    $0007
+                dc.w    $0005
+
+
+
 loc_11bf8 00 00 d8 2e                      ori.b #46,d0
 loc_11bfc d8 30 d8 34                      add.b (a0)(0000000000000034,a5:l),d4
 loc_11c00 d8 36 d8 5e                      add.b (a6)(000000000000005e,a5:l),d4
-loc_11c04 d8 6e 4a 28                      add.w (a6)(18984),d4
-loc_11c08 00 02 67 18                      ori.b #$18d2
-loc_11c0c 7e 00                            moveq   #0,d7
-loc_11c0e 7c 00                            moveq   #0,d6
-loc_11c10 1e 28 00 00                      move.b  (a0),d7
-loc_11c14 1c 28 00 01                      move.b 1(a0),d6
-loc_11c18 48 a7 f8 80                      movem.w d0-d4/a0,-(sp)
-loc_11c1c 61 00 fe f8                      bsr.w   loc_11b16
-loc_11c20 4c 9f 01 1f                      movem.w (sp)+,d0-d4/a0
-loc_11c24 58 88                            addq.l #4,a0
-loc_11c26 51 c9 ff de                      dbf     d1,loc_11c06
-loc_11c2a 58 40                            addq.w  #4,d0
-loc_11c2c 51 cb ff 98                      dbf     d3,loc_11bc6
-loc_11c30 4a 38 d8 30                      tst.b   ($FFFFd830
-loc_11c34 67 04                            beq.s   loc_11c3a
-loc_11c36 61 00 ff 4e                      bsr.w   loc_11b86
-loc_11c3a 4e 75                            rts
-loc_11c3c 41 f8 d2 58                      lea     ($FFFFd258,a0
-loc_11c40 43 fa 00 32                      lea     (pc)(loc_11c74),a1
-loc_11c44 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
-loc_11c4c 67 04                            beq.s   loc_11c52
-loc_11c4e 43 fa 00 36                      lea     (pc)(loc_11c86),a1
-loc_11c52 7e 00                            moveq   #0,d7
-loc_11c54 7c 00                            moveq   #0,d6
-loc_11c56 7a 00                            moveq   #0,d5
-loc_11c58 1e 38 d8 2e                      move.b  ($FFFFD82E).w,d7
-loc_11c5c 1c 38 d8 2f                      move.b  ($FFFFD82F).w,d6
-loc_11c60 53 06                            subq.b  #1,d6
-loc_11c62 3a 3c e0 00                      move.w  #-8192,d5
-loc_11c66 61 00 f2 bc                      bsr.w   loc_10f24
-loc_11c6a 7e 02                            moveq   #2,d7
-loc_11c6c 7c 00                            moveq   #0,d6
-loc_11c6e 61 00 f7 0a                      bsr.w   loc_1137a
-loc_11c72 4e 75                            rts
-loc_11c74 04 04 00 01                      subi.b #1,d4
-loc_11c78 a2 62                            .short 0xa262
-loc_11c7a 00 01 a2 6e                      ori.b #110,d1
-loc_11c7e 00 01 a2 68                      ori.b #104,d1
-loc_11c82 00 01 a2 6e                      ori.b #110,d1
-loc_11c86 04 04 00 01                      subi.b #1,d4
-loc_11c8a 1c 98                            move.b  (a0)+,(a6)
-loc_11c8c 00 01 1c a4                      ori.b #-92,d1
-loc_11c90 00 01 1c 9e                      ori.b #-98,d1
-loc_11c94 00 01 1c a4                      ori.b #-92,d1
-ExitSignMaps:                                    ; $11C98
-                dc.w    $0693, $0694, $0695
+loc_11c04 d8 6e
 
-loc_11c9e 06 96 06 97 06 98                addi.l  #110560920,(a6)
-loc_11ca4 06 99 06 9a 06 9b                addi.l  #110757531,(a1)+
+; ======================================================================
+
+loc_11C06:
+                tst.b   $2(a0)
+                beq.s   loc_11C24
+
+
+loc_11c0c:
+                moveq   #0,d7                    ; Clear d7.
+                moveq   #0,d6                    ; Clear d6.
+                move.b  (a0),d7
+                move.b  1(a0),d6
+                movem.w d0-d4/a0,-(sp)           ; Store used registers to the stack.
+                bsr.w   loc_11b16                ; Dump mappings to Plane A from an address in RAM.
+                movem.w (sp)+,d0-d4/a0           ; Restore register values.
+loc_11C24:
+                addq.l  #4,a0
+                dbf     d1,loc_11c06
+                addq.w  #4,d0
+                dbf     d3,loc_11bc6
+                tst.b   ($FFFFD830).w
+                beq.s   loc_11c3a
+                bsr.w   loc_11b86
+loc_11c3a:
+                rts
+
+; ======================================================================
+
+loc_11c3c:
+                lea     ($FFFFD258).w,a0         ; Load a segment of the door variables.
+                lea     Jap_ExitSignMap(pc),a1   ; Load the 'FLICKY' sign maps table exclusive to Japan.
+                btst    #7,($A10001).l           ; Is the console a domestic MD?
+                beq.s   loc_11c52                ; If it is, branch.
+                lea     Eng_ExitSignMap(pc),a1   ; Otherwise, load the 'EXIT' sign maps table seen elsewhere.
+loc_11c52:
+                moveq   #0,d7                    ; Clear d7.
+                moveq   #0,d6                    ; Clear d6.
+                moveq   #0,d5                    ; Clear d5.
+                move.b  ($FFFFD82E).w,d7         ; Load the exit door's X axis grid coordinate.
+                move.b  ($FFFFD82F).w,d6         ; Load the exit door's Y axis grid coordinate.
+                subq.b  #1,d6                    ; Set to load above the door.
+                move.w  #$E000,d5                ; Set to draw to Plane B, at positions d7 and d6.
+                bsr.w   loc_10f24                ; Convert d5's VRAM address into a proper VDP command.
+                moveq   #2,d7                    ; Set to draw 3 tiles across...
+                moveq   #0,d6                    ; ...And 1 tile down.
+                bsr.w   SignFrameLogic           ; Run sign logic and draw to the screen.
+                rts                              ; Return.
+
+; ----------------------------------------------------------------------
+
+Jap_ExitSignMap:                                 ; $11C74
+                dc.b    $04, $04                 ; Number of sign frame entries, and the number of frames until that new entry is loaded.
+                dc.l    FlickySignMaps           ; White.
+                dc.l    FlickySignMaps+$C        ; Red.
+                dc.l    FlickySignMaps+6         ; Black.
+                dc.l    FlickySignMaps+$C        ; Red.
+
+; ----------------------------------------------------------------------
+
+Eng_ExitSignMap:                                 ; $11C86
+                dc.b    $04, $04                 ; Number of sign frame entries, and the number of frames until that new entry is loaded.
+                dc.l    ExitSignMaps             ; White.
+                dc.l    ExitSignMaps+$C          ; Red.
+                dc.l    ExitSignMaps+6           ; Black.
+                dc.l    ExitSignMaps+$C          ; Red.
+
+; ----------------------------------------------------------------------
+
+ExitSignMaps:                                    ; $11C98
+                dc.w    $0693, $0694, $0695      ; White 'EXIT' text.
+                dc.w    $0696, $0697, $0698      ; Black 'EXIT' text.
+                dc.w    $0699, $069A, $069B      ; Red 'EXIT' text.
 
 ; ======================================================================
 
 loc_11caa:
                 lea     loc_11cb8(pc),a1
                 bsr.w   loc_11d38
-                bsr.w   loc_116be
+                bsr.w   TimerCounter             ; Update timer.
                 rts
 
 ; ----------------------------------------------------------------------
@@ -3998,15 +4053,23 @@ loc_11cd4 04 02
 ; ======================================================================
 
 
-loc_11ce6 43 fa 00 08                      lea     (pc)(loc_11cf0),a1
-loc_11cea 4e f9 00 01 1d 38                jmp loc_11d38
-loc_11cf0 05 02                            btst d2,d2
-loc_11cf2 00 01 1d 06                      ori.b #6,d1
-loc_11cf6 00 01 a4 6c                      ori.b #108,d1
-loc_11cfa 00 01 a4 7e                      ori.b #126,d1
-loc_11cfe 00 01 a4 90                      ori.b #-112,d1
-loc_11d02 00 01 a4 a2                      ori.b #-94,d1
-loc_11d06 00 00 00 00                      ori.b #0,d0
+loc_11ce6:
+                lea     loc_11cf0(pc),a1
+                jmp     loc_11d38
+                
+; ----------------------------------------------------------------------
+
+loc_11cf0 05 02
+                dc.l    loc_11D06               
+                dc.l    loc_1A46C
+                dc.l    loc_1A47E
+                dc.l    loc_1A490
+                dc.l    loc_1A4A2
+
+; ----------------------------------------------------------------------
+
+loc_11d06:
+00 00 00 00                      ori.b #0,d0
 loc_11d0a 00 00 00 00                      ori.b #0,d0
 loc_11d0e 00 00 00 00                      ori.b #0,d0
 loc_11d12 00 00 00 00                      ori.b #0,d0
@@ -4022,11 +4085,11 @@ loc_11D18:
 ; TODO
 
 loc_11d22 05 01                            btst d2,d1
-loc_11d24 00 01 a2 74                      ori.b #116,d1
-loc_11d28 00 01 a4 a2                      ori.b #-94,d1
-loc_11d2c 00 01 a4 90                      ori.b #-112,d1
-loc_11d30 00 01 a4 7e                      ori.b #126,d1
-loc_11d34 00 01 a4 6c                      ori.b #108,d1
+                dc.l    DoorMaps
+                dc.l    loc_1A4A2
+                dc.l    loc_1A490
+                dc.l    loc_1A47E
+                dc.l    loc_1A46C
 
 ; ======================================================================
 
@@ -4045,11 +4108,11 @@ loc_11d38:
                 moveq   #2,d6
 loc_11D5E:
                 movem.l d5-a4,-(sp)
-                bsr.w   loc_1137a
+                bsr.w   SignFrameLogic
                 tst.b   2(a0)
                 bne.s   loc_11d7e
                 bsr.w   CheckObjectRAM
-                bsr.w   loc_116be
+                bsr.w   TimerCounter             ; Update timer.
                 jsr     ($FFFFFB6C).w
                 movem.l (sp)+,d5-a4
                 bra.s   loc_11d5e
@@ -4115,12 +4178,12 @@ loc_11dfe:
 ; ======================================================================
 
 loc_11e06:
-                lea     loc_11e46(pc),a6
-                btst    #6,($A10001).l
-                beq.s   loc_11e18
-                lea     loc_11e4c(pc),a6
-                bsr.w   loc_10faa
-loc_11e1c:                                       ; TODO - annotate this, you know what it does.
+                lea     loc_11e46(pc),a6         ; Load the normal 'RD.' mappings.
+                btst    #6,($A10001).l           ; Is this being played on a PAL console?
+                beq.s   loc_11e18                ; If it isn't, branch.
+                lea     loc_11e4c(pc),a6         ; Otherwise, load the repositioned 'RD.' mappings.
+                bsr.w   WriteASCIIString         ; Write onto the screen.
+loc_11e1c:
                 lea     Map_1Player,a6           ; Load the '1P' mappings into a6.
                 moveq   #1,d7                    ; Set to write 2 tiles horizontally.
                 moveq   #0,d6                    ; Set to write 1 tile vertically.
@@ -4137,59 +4200,71 @@ loc_11e1c:                                       ; TODO - annotate this, you kno
 
 ; ======================================================================
 
-loc_11e46: c6 b4 52 44                      and.l (a4)(0000000000000044,d5.w:2),d3
-loc_11e4a 2e 00                            move.l  d0,d7
-loc_11e4c: c7 74 52 44                      and.w d3,(a4)(0000000000000044,d5.w:2)
-loc_11e50 2e 00                            move.l  d0,d7
+loc_11e46:
+                dc.w    $C6B4                    ; VRAM address to write to.
+                dc.b    'RD.'                    ; Mappings text.
+                dc.b    $00                      ; String terminator.
 
+loc_11e4c:
+                dc.w    $C774                    ; VRAM address to write to.
+                dc.b    'RD.'                    ; Mappings text.
+                dc.b    $00                      ; String terminator.
 
-loc_11e52 4d f8 d2 66                      lea     ($FFFFD266).w,a6
-loc_11e56 7a 00                            moveq   #0,d5
-loc_11e58 3a 3c c1 60                      move.w  #-16032,d5
-loc_11e5c 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
-loc_11e64 67 02                            beq.s   loc_11e68
-loc_11e66 59 45                            subq.w  #4,d5
-loc_11e68 70 00                            moveq   #0,d0
-loc_11e6a 61 00 f1 88                      bsr.w   loc_10ff4
-loc_11e6e 4d f8 d2 67                      lea     ($FFFFD267).w,a6
-loc_11e72 7a 00                            moveq   #0,d5
-loc_11e74 3a 3c c1 6c                      move.w  #-16020,d5
-loc_11e78 70 00                            moveq   #0,d0
-loc_11e7a 61 00 f1 78                      bsr.w   loc_10ff4
-loc_11e7e 4a 38 d2 66                      tst.b   ($FFFFD266).w
-loc_11e82 66 10                            bne.s   loc_11e94
-loc_11e84 4d f8 d2 68                      lea     ($FFFFD268).w,a6
-loc_11e88 7a 00                            moveq   #0,d5
-loc_11e8a 3a 3c c2 60                      move.w  #-15776,d5
-loc_11e8e 70 03                            moveq   #3,d0
-loc_11e90 61 00 f1 62                      bsr.w   loc_10ff4
-loc_11e94 4e 75                            rts
+; ======================================================================
+
+loc_11e52:
+                lea     ($FFFFD266).w,a6         ; Load the level's ending time to a6 (minutes).
+                moveq   #0,d5                    ; Clear d5.
+                move.w  #$C160,d5                ; Set the VRAM address to write to.
+                btst    #7,($A10001).l           ; Is the console a Japanese MD?
+                beq.s   loc_11e68                ; If it is, branch.
+                subq.w  #4,d5                    ; Give some spacing between the letters.
+loc_11e68:
+                moveq   #0,d0                    ; Set to draw 1 number.
+                bsr.w   loc_10ff4                ; Draw it onto the screen.
+                lea     ($FFFFD267).w,a6         ; Load the level's ending time to a6 (seconds).
+                moveq   #0,d5                    ; Clear d5.
+                move.w  #$C16C,d5                ; Set the VRAM address to write to.
+                moveq   #0,d0                    ; Set to draw 1 number.
+                bsr.w   loc_10ff4                ; Draw it onto the screen.
+                tst.b   ($FFFFD266).w            ; Has a minute elapsed?
+                bne.s   loc_11e94                ; If not, branch.
+                lea     ($FFFFD268).w,a6         ; Load the bonus score RAM address into a6.
+                moveq   #0,d5                    ; Clear d5.
+                move.w  #$C260,d5                ; Set the VRAM address to write to.
+                moveq   #3,d0                    ; Set to write 4 numbers.
+                bsr.w   loc_10ff4                ; Draw the numbers onto the screen.
+loc_11e94:
+                rts
+                
+; ======================================================================
+
 loc_11e96 4d fa 00 6c                      lea     (pc)(loc_11f04),a6
 loc_11e9a 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
 loc_11ea2 67 04                            beq.s   loc_11ea8
 loc_11ea4 4d fa 00 9a                      lea     (pc)(loc_11f40),a6
-loc_11ea8 61 00 f1 00                      bsr.w   loc_10faa
+loc_11ea8 61 00 f1 00                      bsr.w   WriteASCIIString
 loc_11eac 4d fa 00 62                      lea     (pc)(loc_11f10),a6
 loc_11eb0 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
 loc_11eb8 67 04                            beq.s   loc_11ebe
 loc_11eba 4d fa 00 92                      lea     (pc)(loc_11f4e),a6
-loc_11ebe 61 00 f0 ea                      bsr.w   loc_10faa
+loc_11ebe 61 00 f0 ea                      bsr.w   WriteASCIIString
 loc_11ec2 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
 loc_11eca 67 08                            beq.s   loc_11ed4
 loc_11ecc 4d fa 00 88                      lea     (pc)(loc_11f56),a6
-loc_11ed0 61 00 f0 d8                      bsr.w   loc_10faa
+loc_11ed0 61 00 f0 d8                      bsr.w   WriteASCIIString
 loc_11ed4 4d fa 00 48                      lea     (pc)(loc_11f1e),a6
 loc_11ed8 08 39 00 07 00 a1 00 01          btst    #7,($A10001).l
 loc_11ee0 67 04                            beq.s   loc_11ee6
 loc_11ee2 4d fa 00 7a                      lea     (pc)(loc_11f5e),a6
-loc_11ee6 61 00 f0 c2                      bsr.w   loc_10faa
+loc_11ee6 61 00 f0 c2                      bsr.w   WriteASCIIString
 loc_11eea 4a 38 d2 66                      tst.b   ($FFFFD266).w
 loc_11eee 66 0a                            bne.s   loc_11efa
 loc_11ef0 4d fa 00 3a                      lea     (pc)(loc_11f2c),a6
-loc_11ef4 61 00 f0 b4                      bsr.w   loc_10faa
+loc_11ef4 61 00 f0 b4                      bsr.w   WriteASCIIString
 loc_11ef8 60 08                            bra.s   loc_11f02
 loc_11efa 4d fa 00 38                      lea     (pc)(loc_11f34),a6
-loc_11efe 61 00 f0 aa                      bsr.w   loc_10faa
+loc_11efe 61 00 f0 aa                      bsr.w   WriteASCIIString
 loc_11f02 4e 75                            rts
 loc_11f04 c1 4a                            exg a0,a2
 loc_11f06 47 41                            .short 0x4741
@@ -4291,7 +4366,7 @@ loc_11FE2:
                 lea     Map_EngTitle(pc),a0      ; Load the English cast text.
 loc_11ffc:
                 movea.l (a0)+,a6                 ; Load the pointer into a6.
-                bsr.w   loc_10faa                ; Dump onto the screen.
+                bsr.w   WriteASCIIString                ; Dump onto the screen.
                 dbf     d0,loc_11ffc             ; Repeat for the rest.
                 move.b  #3,($FFFFD882).w         ;
                 move.w  #$101,($FFFFD82C).w      ; Set the BCD and hex level round to 0101.
@@ -4872,7 +4947,7 @@ loc_125be:
                 lea     Pal_Main,a5              ; Load the main palette source into a5.
                 jsr     ($FFFFFBBA).w            ; Decode the palettes and load them into the palette buffer.
                 lea     Map_LSRound(pc),a6       ; Load the 'ROUND' mappings into a6.
-                bsr.w   loc_10faa                ; Dump them onto the screen.
+                bsr.w   WriteASCIIString                ; Dump them onto the screen.
                 move.b  #3,($FFFFD882).w
                 move.b  #1,($FFFFD29A).w
                 jsr     ($FFFFFB6C).w
@@ -4930,8 +5005,8 @@ loc_12656:
                 bsr.w   loc_100d4                ; Clear some variables, load some compressed art, set to load next game mode.
                 lea     Pal_Main,a5              ; Load the main palette into a5.
                 jsr     ($FFFFFBBA).w            ; Decode the palette and load it into the palette buffer.
-                clr.l   ($FFFFD888).w            ; TODO
-                clr.b   ($FFFFD88D).w
+                clr.l   ($FFFFD888).w            ; Clear the in-game timer.
+                clr.b   ($FFFFD88D).w            ; Clear the amount of times chicks have been deposited in one level.
                 rts                              ; Return.
 
 ; ======================================================================
@@ -5347,7 +5422,7 @@ loc_12b86 6e 04                            bgt.s   loc_12b8c
 loc_12b88 5e b8 d2 96                      addq.l #7,($FFFFD296).w
 loc_12b8c 61 00 01 f6                      bsr.w   loc_12d84
 loc_12b90 61 00 e6 50                      bsr.w   CheckObjectRAM
-loc_12b94 61 00 eb 28                      bsr.w   loc_116be
+loc_12b94 61 00 eb 28                      bsr.w   TimerCounter
 loc_12b98 4e 75                            rts
 loc_12b9a 08 f8 00 07 d2 a0                bset    #7,($FFFFD2A0).w
 loc_12ba0 66 30                            bne.s   loc_12bd2
@@ -5548,7 +5623,7 @@ loc_12e00:
                 jsr     ($FFFFFB6C).w
                 moveq   #$3C,d2
 loc_12E0A:
-                bsr.w   loc_116be
+                bsr.w   TimerCounter             ; Update the timer.
                 jsr     ($FFFFFB6C).w
                 dbf     d2,loc_12e0a
                 bsr.w   loc_11caa
@@ -5676,9 +5751,9 @@ loc_12F8C:
                 move.w  #$220D,(a0)              ; Set to map the first 'platform' tile.
                 dbf     d0,loc_12f8c             ; Repeat $1F tiles.
                 lea     loc_12fcc(pc),a6         ; Set to write BONUS.
-                bsr.w   loc_10faa                ; Write onto the screen.
+                bsr.w   WriteASCIIString                ; Write onto the screen.
                 lea     loc_12fd4(pc),a6         ; Set to write STAGE.
-                bsr.w   loc_10faa                ; Write onto the screen.
+                bsr.w   WriteASCIIString                ; Write onto the screen.
                 bsr.w   loc_1303c                ; TODO - no more comments
                 bsr.w   loc_11e06
                 bsr.w   loc_11dc2
@@ -5867,9 +5942,9 @@ loc_131d6:
                 bsr.w   loc_11740
 loc_131DA:
                 lea     loc_131ec(pc),a6              ; TODO credits stuff.
-                bsr.w   loc_10faa
+                bsr.w   WriteASCIIString
                 lea     loc_13200(pc),a6
-                bsr.w   loc_10faa
+                bsr.w   WriteASCIIString
                 rts
 
 ; ----------------------------------------------------------------------
@@ -6596,7 +6671,7 @@ loc_13a2a:
 loc_13a3c:
                 bsr.w   loc_12d84
                 bsr.w   CheckObjectRAM
-                bsr.w   loc_116be
+                bsr.w   TimerCounter
                 bclr    #0,($FFFFD886).w
                 beq.s   loc_13a5a
                 bsr.w   loc_11784
@@ -7388,7 +7463,7 @@ loc_1443c 11 fc 00 01 d8 86                move.b  #1,($FFFFD886).w
 loc_14442 61 00 d2 de                      bsr.w   loc_11722
 loc_14446 31 fc 00 20 ff c0                move.w  #$20,($FFFFFFC0).w
 loc_1444c 74 3c                            moveq   #$3C,d2
-loc_1444e 61 00 d2 6e                      bsr.w   loc_116be
+loc_1444e 61 00 d2 6e                      bsr.w   TimerCounter
 loc_14452 4e b8 fb 6c                      jsr     ($FFFFFB6C).w
 loc_14456 51 ca ff f6                      dbf     d2,loc_1444e
 loc_1445a 60 06                            bra.s   loc_14462
@@ -10961,16 +11036,16 @@ loc_1691a 4e 75                            rts
 loc_1691c 4a 38 d2 8e                      tst.b   ($FFFFD28E).w
 loc_16920 67 22                            beq.s   loc_16944
 loc_16922 4d fa 00 28                      lea     (pc)(loc_1694c),a6
-loc_16926 61 00 a6 82                      bsr.w   loc_10faa
+loc_16926 61 00 a6 82                      bsr.w   WriteASCIIString
 loc_1692a 0c 38 00 14 d2 8e                cmpi.b  #$14,($FFFFD28E).w
 loc_16930 66 10                            bne.s   loc_16942
 loc_16932 4d fa 00 30                      lea     (pc)(loc_16964),a6
-loc_16936 61 00 a6 72                      bsr.w   loc_10faa
+loc_16936 61 00 a6 72                      bsr.w   WriteASCIIString
 loc_1693a 4d fa 00 38                      lea     (pc)(loc_16974),a6
-loc_1693e 61 00 a6 6a                      bsr.w   loc_10faa
+loc_1693e 61 00 a6 6a                      bsr.w   WriteASCIIString
 loc_16942 4e 75                            rts
 loc_16944 4d fa 00 36                      lea     (pc)(loc_1697c),a6
-loc_16948 60 00 a6 60                      bra.w   loc_10faa
+loc_16948 60 00 a6 60                      bra.w   WriteASCIIString
 loc_1694c c2 4e                            .short 0xc24e
 loc_1694e 3b 20                            move.w  (a0)-,(a5)-
 loc_16950 32 35 30 20                      move.w  (a5)(0000000000000020,d3.w),d1
@@ -16670,7 +16745,9 @@ loc_1a49a 63 3e                            bls.s   loc_1a4da
 loc_1a49c 63 3f                            bls.s   loc_1a4dd
 loc_1a49e 62 05                            bhi.s   loc_1a4a5
 loc_1a4a0 63 40                            bls.s   loc_1a4e2
-loc_1a4a2 63 41                            bls.s   loc_1a4e5
+
+
+loc_1a4a2: 63 41                            bls.s   loc_1a4e5
 loc_1a4a4 62 05                            bhi.s   loc_1a4ab
 loc_1a4a6 63 42                            bls.s   loc_1a4ea
 loc_1a4a8 63 43                            bls.s   loc_1a4ed
@@ -18905,7 +18982,7 @@ loc_1b99e 00 00
 
 Padding2:
                 alignFF $20000                   ; Pad to 128KB.
-                
+
 EndofROM
 
 
