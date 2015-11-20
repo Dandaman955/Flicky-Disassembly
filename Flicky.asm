@@ -10,7 +10,8 @@
 ; MarkeyJester - AlignFF macro.
 ;
 ; NOTES
-;
+;$FFCC00         - Top score (stored as BCD).
+; $FF
 ; - The entire main block of code ($10000-$1C000) is written and run from
 ;   RAM ($FF0000-$FFC000). This means that Regen will likely have problems
 ;   when debugging from any addresses there (although there are jumps to
@@ -31,8 +32,7 @@
 ; $FF0000-$FFBFFF - Main game code, executed in RAM.
 ; $FFC000-$FFC7FF - Object RAM.
 ; $FFC800-$FFC37F - Bonus stage object RAM.
-; $FFCC00         - Top score (stored as BCD).
-; $FFD24E         - Bonus stage flag.
+; D24E         - Bonus stage flag.
 ; $FFD24F         - Level freeze flag (for depositing chicks).
 ; $FFD266         - Time you finished the level, in minutes.
 ; $FFD267         - Time you finished the level, in seconds.
@@ -61,6 +61,7 @@
 ; $FFFFA8         - Horizontal scroll value.
 ; $FFFFC0         - Game mode.
 ; $FFFFC8         - Z80 stop check. Only used on controllers. 1 - Stopped, 0 - Running.
+; $FFFFCA         - Random number. Routine not used in Flicky, and by extension, this address.
 ; $FFFFFC-$FFFFFF - Checksum init flag.
 ;
 ; OBJECT SSTS
@@ -1387,12 +1388,12 @@ loc_F42:
 
 ; ======================================================================
 
-loc_f4a:
-                move.l  ($FFFFFFCA).w,d1
-                bne.s   loc_f56
-                move.l  #$2A6D365A,d1
+RandomNumber:                                    ; $F4A
+                move.l  ($FFFFFFCA).w,d1         ; Move the current random number into d1.
+                bne.s   loc_f56                  ; If it already has a number, branch.
+                move.l  #$2A6D365A,d1            ; Generate a random seed.
 loc_f56:
-                move.l  d1,d0
+                move.l  d1,d0                    ; Below instructions randomise the number, no reason to comment, really...
                 asl.l   #2,d1
                 add.l   d0,d1
                 asl.l   #3,d1
@@ -1402,8 +1403,8 @@ loc_f56:
                 add.w   d1,d0
                 move.w  d0,d1
                 swap    d1
-                move.l  d1,($FFFFFFCA).w
-                rts
+                move.l  d1,($FFFFFFCA).w         ; Store in the random number address.
+                rts                              ; Return.
 
 ; ======================================================================
                         ; TODO - This shit!
@@ -1927,7 +1928,7 @@ RAMPointerTable:                                 ; $22FC
                 dc.w    loc_1100                 ; ($FFFB66).
                 dc.w    loc_1114                 ; ($FFFB6C).
                 dc.w    WaitforVBlank            ; Waits for VBlank ($FFFB72).
-                dc.w    loc_F4A                  ; ($FFFB78).
+                dc.w    RandomNumber             ; Generates a random number in $FFFFCA ($FFFB78).
                 dc.w    PlaneMaptoVRAM2          ; Writes plane mappings onto the screen ($FFFB7E).
                 dc.w    PlaneMaptoVRAM3          ; Writes a repeating tile onto the screen($FFFB84).
                 dc.w    loc_F10                  ; ($FFFB8A).
@@ -2711,7 +2712,8 @@ loc_11158:
                 rts                              ; Return.
 
 ; ======================================================================
-
+; Converts mappings into sprites readable by the VDP.
+; ======================================================================
 BuildSprites:                                  ; $11166
                 btst    #1,2(a0)               ; Is the disable sprite update/display bit set?
                 beq.s   BuildSprites_Main      ; If not, set to load the sprite.
@@ -3445,13 +3447,13 @@ loc_117c0:
                 beq.w   loc_11874
                 lsl.w   #3,d0
                 lsl.w   #3,d1
-                move.w  $20(a0),d3
-                lea     loc_11878(pc),a6
+                move.w  $20(a0),d3               ; Move the object's horizontal position into d3.
+                lea     loc_11878(pc),a6         ; Load the TODO address into a6.
                 add.w   (a6,d0.w),d3
                 move.w  d3,d2
                 addq.l  #2,a6
                 add.w   (a6,d0.w),d3
-                move.w  $20(a1),d5
+                move.w  $20(a1),d5               ; Move TODO's horizontal position into d5.
                 add.w   loc_11878(pc,d1.w),d5
                 move.w  d5,d4
                 add.w   loc_1187a(pc,d1.w),d5
